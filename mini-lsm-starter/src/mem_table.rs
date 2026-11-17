@@ -18,7 +18,7 @@
 use std::ops::Bound;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Result;
 use bytes::Bytes;
@@ -53,7 +53,11 @@ pub(crate) fn map_bound(bound: Bound<&[u8]>) -> Bound<Bytes> {
 impl MemTable {
     /// Week 1 Day 1: create the plain in-memory memtable.
     pub fn create(_id: usize) -> Self {
-        unimplemented!()
+        let map =  Arc::new(SkipMap::new());
+        let wal = None; // no WAL in the start
+        let id = _id;
+        let approximate_size = Arc::new(AtomicUsize::new(0));
+        Self { map, wal, id, approximate_size }
     }
 
     /// Week 2 Day 6: create a memtable backed by a write-ahead log.
@@ -86,8 +90,8 @@ impl MemTable {
     }
 
     /// Week 1 Day 1: get a value by key.
-    pub fn get(&self, _key: &[u8]) -> Option<Bytes> {
-        unimplemented!()
+    pub fn get(&self, key: &[u8]) -> Option<Bytes> {
+        self.map.get(key).map(|x| x.value().clone())
     }
 
     /// Put a key-value pair into the memtable.
@@ -95,8 +99,10 @@ impl MemTable {
     /// Week 1 Day 1: put the key-value pair into the in-memory map.
     /// Week 2 Day 6: also append the data to the write-ahead log.
     /// Week 3 Day 5: route the write through the batch WAL implementation.
-    pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
-        unimplemented!()
+    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        self.approximate_size.fetch_add(key.len() + value.len(), Ordering::Relaxed); 
+        self.map.insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value));
+        Ok(())
     }
 
     /// Week 3 Day 5: put a batch of key-value pairs.
@@ -172,5 +178,26 @@ impl StorageIterator for MemTableIterator {
 
     fn next(&mut self) -> Result<()> {
         unimplemented!()
+    }
+}
+
+/// Student-added tests: behavior the supplied week1_day1 tests do not establish.
+#[cfg(test)]
+mod student_tests {
+    use super::MemTable;
+
+    /// A tombstone overwrites an earlier value. `MemTable::get` must return the raw
+    /// empty value (not `None`) so the engine can stop probing older memtables.
+    /// Size accounting is cumulative: the overwritten bytes are not subtracted, and
+    /// the tombstone still counts its key length.
+    #[test]
+    fn tombstone_overwrite_is_visible_and_counted() {
+        let m = MemTable::create(0);
+        m.put(b"a", b"1").unwrap();
+        m.put(b"a", b"").unwrap();
+
+        assert_eq!(m.get(b"a").as_deref(), Some(&b""[..]));
+        assert_eq!(m.get(b"missing"), None);
+        assert_eq!(m.approximate_size(), (1 + 1) + (1 + 0));
     }
 }
