@@ -53,11 +53,16 @@ pub(crate) fn map_bound(bound: Bound<&[u8]>) -> Bound<Bytes> {
 impl MemTable {
     /// Week 1 Day 1: create the plain in-memory memtable.
     pub fn create(_id: usize) -> Self {
-        let map =  Arc::new(SkipMap::new());
+        let map = Arc::new(SkipMap::new());
         let wal = None; // no WAL in the start
         let id = _id;
         let approximate_size = Arc::new(AtomicUsize::new(0));
-        Self { map, wal, id, approximate_size }
+        Self {
+            map,
+            wal,
+            id,
+            approximate_size,
+        }
     }
 
     /// Week 2 Day 6: create a memtable backed by a write-ahead log.
@@ -100,8 +105,10 @@ impl MemTable {
     /// Week 2 Day 6: also append the data to the write-ahead log.
     /// Week 3 Day 5: route the write through the batch WAL implementation.
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        self.approximate_size.fetch_add(key.len() + value.len(), Ordering::Relaxed); 
-        self.map.insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value));
+        self.approximate_size
+            .fetch_add(key.len() + value.len(), Ordering::Relaxed);
+        self.map
+            .insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value));
         Ok(())
     }
 
@@ -118,8 +125,20 @@ impl MemTable {
     }
 
     /// Get an iterator over a range of keys.
-    pub fn scan(&self, _lower: Bound<&[u8]>, _upper: Bound<&[u8]>) -> MemTableIterator {
-        unimplemented!()
+    pub fn scan(&self, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> MemTableIterator {
+        // __Builder generates by ouroboros
+        let mut iter = MemTableIteratorBuilder {
+            map: Arc::clone(&self.map), // increment ref count on map when iterator is created
+            iter_builder: |map| map.range((map_bound(lower), map_bound(upper))), // gets evaluated after build() calls
+            item: (Bytes::new(), Bytes::new()), // empty value as initialization
+        }
+        .build(); // builds actual iterator object
+
+        // structs fields are private, accessibale via borrow_item() and with_mut()
+        // one line in scan
+        iter.next()
+            .expect("iterator on in-memory skipmap should never be err");
+        iter
     }
 
     /// Flush the mem-table to SSTable. Implement in week 1 day 6.
@@ -142,6 +161,9 @@ impl MemTable {
     }
 }
 
+/// 'a mentions that the range iterator borrows the SkipMap
+/// holds a reference in the map so the iterator can't live longer than the  
+/// underlying map itself
 type SkipMapRangeIter<'a> =
     crossbeam_skiplist::map::Range<'a, Bytes, (Bound<Bytes>, Bound<Bytes>), Bytes, Bytes>;
 
@@ -157,7 +179,7 @@ pub struct MemTableIterator {
     #[borrows(map)]
     #[not_covariant]
     iter: SkipMapRangeIter<'this>,
-    /// Stores the current key-value pair.
+    /// Stores the current key-value pair in SkipList
     item: (Bytes, Bytes),
 }
 
@@ -165,19 +187,25 @@ impl StorageIterator for MemTableIterator {
     type KeyType<'a> = KeySlice<'a>;
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        &self.borrow_item().1[..]
     }
 
     fn key(&self) -> KeySlice<'_> {
-        unimplemented!()
+        KeySlice::from_slice(&self.borrow_item().0[..])
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        !self.borrow_item().0.is_empty()
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        self.with_mut(|fields| match fields.iter.next() {
+            // Bytes::clone is a refcount bump, not a copy of the data.
+            Some(entry) => *fields.item = (entry.key().clone(), entry.value().clone()),
+            // Exhausted: store the end-of-iterator marker.
+            None => *fields.item = (Bytes::new(), Bytes::new()),
+        });
+        Ok(())
     }
 }
 
@@ -198,6 +226,7 @@ mod student_tests {
 
         assert_eq!(m.get(b"a").as_deref(), Some(&b""[..]));
         assert_eq!(m.get(b"missing"), None);
-        assert_eq!(m.approximate_size(), (1 + 1) + (1 + 0));
+        // put("a", "1") adds 1 + 1; put("a", "") adds 1 + 0.
+        assert_eq!(m.approximate_size(), 3);
     }
 }

@@ -18,10 +18,11 @@ use bytes::Bytes;
 
 pub const TS_ENABLED: bool = false;
 
-pub struct Key<T: AsRef<[u8]>>(T);
+pub struct Key<T: AsRef<[u8]>>(T); // struct with a single field of T 
+// T must qualify to be viewable as &[u8]
 
-pub type KeySlice<'a> = Key<&'a [u8]>;
-pub type KeyVec = Key<Vec<u8>>;
+pub type KeySlice<'a> = Key<&'a [u8]>; // borrowed view of key
+pub type KeyVec = Key<Vec<u8>>; // 
 pub type KeyBytes = Key<Bytes>;
 
 impl<T: AsRef<[u8]>> Key<T> {

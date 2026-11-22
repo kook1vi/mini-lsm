@@ -298,12 +298,25 @@ impl LsmStorageInner {
 
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
-        let result = self.state.read().memtable.get(key);
-        match result {
-            None => Ok(None),
-            Some(bytes) if bytes.is_empty() => Ok(None),
-            _ => Ok(result)
+        // One consistent snapshot of the structure: clone the Arc (refcount bump),
+        // and let the read guard drop at the end of this block.
+        let snapshot = {
+            let guard = self.state.read();
+            Arc::clone(&guard)
+        };
+
+        // Probe newest to oldest: the mutable memtable, then imm_memtables[0], [1], ...
+        // The first memtable holding the key decides the answer, even if it is a tombstone.
+        let memtables = std::iter::once(&snapshot.memtable).chain(snapshot.imm_memtables.iter());
+        for memtable in memtables {
+            if let Some(value) = memtable.get(key) {
+                if value.is_empty() {
+                    return Ok(None); // tombstone: deleted here; do not search older memtables
+                }
+                return Ok(Some(value));
+            }
         }
+        Ok(None)
     }
 
     /// Write a batch of data into the storage. Implement in week 2 day 7.
@@ -315,7 +328,7 @@ impl LsmStorageInner {
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
         self.state.read().memtable.put(key, value)?;
         if self.state.read().memtable.approximate_size() >= self.options.target_sst_size {
-            let mutex_guard = self.state_lock.lock(); 
+            let mutex_guard = self.state_lock.lock();
             if self.state.read().memtable.approximate_size() >= self.options.target_sst_size {
                 self.force_freeze_memtable(&mutex_guard)?;
             }
@@ -353,7 +366,7 @@ impl LsmStorageInner {
         let new_memtable = Arc::new(MemTable::create(self.next_sst_id()));
         // create a write lock
         let mut guard = self.state.write();
-        let mut snapshot = guard.as_ref().clone(); 
+        let mut snapshot = guard.as_ref().clone();
         let old_memtable = std::mem::replace(&mut snapshot.memtable, new_memtable);
         snapshot.imm_memtables.insert(0, old_memtable);
         *guard = Arc::new(snapshot);
