@@ -17,6 +17,7 @@
 
 use std::cmp::{self};
 use std::collections::BinaryHeap;
+use std::collections::binary_heap::PeekMut;
 
 use anyhow::Result;
 
@@ -24,8 +25,10 @@ use crate::key::KeySlice;
 
 use super::StorageIterator;
 
+// define wrapper around Box<I>
 struct HeapWrapper<I: StorageIterator>(pub usize, pub Box<I>);
 
+// custom ordering impl
 impl<I: StorageIterator> PartialEq for HeapWrapper<I> {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other) == cmp::Ordering::Equal
@@ -59,7 +62,25 @@ pub struct MergeIterator<I: StorageIterator> {
 
 impl<I: StorageIterator> MergeIterator<I> {
     pub fn create(iters: Vec<Box<I>>) -> Self {
-        unimplemented!()
+        let mut heap: BinaryHeap<HeapWrapper<I>> = iters
+            .into_iter()
+            .enumerate()
+            .filter(
+                // filter out invalid iterator
+                // and guarantee only valid cursor entries
+                |(_, it)| it.is_valid(),
+            )
+            .map(
+                // move iterator wrapper into HeapWrapper
+                |(i, it)| HeapWrapper(i, it),
+            )
+            .collect();
+
+        let current = heap.pop(); // should own the cursor
+        Self {
+            iters: heap,
+            current,
+        }
     }
 }
 
@@ -69,18 +90,56 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
     type KeyType<'a> = KeySlice<'a>;
 
     fn key(&self) -> KeySlice<'_> {
-        unimplemented!()
+        self.current
+            .as_ref()
+            .expect("key() called on an invalid MergeIterator; callers must check is_valid() first")
+            .1
+            .key()
     }
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        self.current
+            .as_ref()
+            .expect(
+                "value() called on an invalid MergeIterator; callers must check is_valid() first",
+            )
+            .1
+            .value()
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        //// Option is either is_some() or is_none()
+        self.current.is_some()
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        // Take ownership of the current cursor.
+        // If we return early (error), current stays None.
+        let mut cur = self.current.take().expect(
+            "next() called on an invalid MergeIterator; callers must check is_valid() first",
+        );
+
+        // Skip stale duplicates of cur's key in the heap
+        while let Some(mut top) = self.iters.peek_mut() {
+            if top.1.key() != cur.1.key() {
+                break; // no more duplicates
+            }
+
+            if let Err(e) = top.1.next() {
+                PeekMut::pop(top); // remove broken cursor from the heap 
+                return Err(e);
+            }
+
+            if !top.1.is_valid() {
+                PeekMut::pop(top); // exhausted current list, remove it from the heap
+            }
+        }
+        cur.1.next()?;
+
+        if cur.1.is_valid() {
+            self.iters.push(cur);
+        }
+        self.current = self.iters.pop();
+        Ok(())
     }
 }
